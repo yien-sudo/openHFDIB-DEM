@@ -35,9 +35,386 @@ Contributors
 
 using namespace Foam;
 
+namespace
+{
+template<class Type, class Setter>
+void interpolateIntPointsParallel
+(
+    const fvMesh& mesh,
+    interpolation<Type>& interpolator,
+    List<List<intPoint>>& intPoints,
+    Setter&& setter
+)
+{
+    const label myProc = Pstream::myProcNo();
+    const label nCells = mesh.nCells();
+
+    List<DynamicList<Tuple2<label, label>>> owners(Pstream::nProcs());
+    List<DynamicList<point>> pointRequests(Pstream::nProcs());
+    List<DynamicList<label>> cellRequests(Pstream::nProcs());
+
+    forAll(intPoints, ibCellI)
+    {
+        List<intPoint>& intList = intPoints[ibCellI];
+
+        forAll(intList, iPoint)
+        {
+            intPoint& curPoint = intList[iPoint];
+
+            setter(curPoint, Type());
+
+            if (curPoint.iProc_ == myProc)
+            {
+                if (curPoint.iCell_ < 0 || curPoint.iCell_ >= nCells)
+                {
+                    curPoint.iProc_ = -1;
+                    continue;
+                }
+
+                setter
+                (
+                    curPoint,
+                    interpolator.interpolate(curPoint.iPoint_, curPoint.iCell_)
+                );
+            }
+            else if (curPoint.iProc_ != -1)
+            {
+                pointRequests[curPoint.iProc_].append(curPoint.iPoint_);
+                cellRequests[curPoint.iProc_].append(curPoint.iCell_);
+                owners[curPoint.iProc_].append
+                (
+                    Tuple2<label, label>(ibCellI, iPoint)
+                );
+            }
+        }
+    }
+
+    PstreamBuffers pointBufs(Pstream::commsTypes::nonBlocking);
+    PstreamBuffers cellBufs(Pstream::commsTypes::nonBlocking);
+
+    for (label proci = 0; proci < Pstream::nProcs(); proci++)
+    {
+        if (proci == myProc)
+        {
+            continue;
+        }
+
+        UOPstream sendPoints(proci, pointBufs);
+        UOPstream sendCells(proci, cellBufs);
+
+        sendPoints << pointRequests[proci];
+        sendCells << cellRequests[proci];
+    }
+
+    pointBufs.finishedSends();
+    cellBufs.finishedSends();
+
+    List<DynamicList<point>> pointRecv(Pstream::nProcs());
+    List<DynamicList<label>> cellRecv(Pstream::nProcs());
+
+    for (label proci = 0; proci < Pstream::nProcs(); proci++)
+    {
+        if (proci == myProc)
+        {
+            continue;
+        }
+
+        UIPstream recvPoints(proci, pointBufs);
+        UIPstream recvCells(proci, cellBufs);
+
+    pointRecv[proci] = DynamicList<point>(recvPoints);
+    cellRecv[proci] = DynamicList<label>(recvCells);
+    }
+
+    pointBufs.clear();
+    cellBufs.clear();
+
+    List<DynamicList<Type>> valueReturn(Pstream::nProcs());
+
+    forAll(pointRecv, proci)
+    {
+        if (proci == myProc)
+        {
+            continue;
+        }
+
+        forAll(pointRecv[proci], idx)
+        {
+            const label cellI = cellRecv[proci][idx];
+
+            if (cellI < 0 || cellI >= nCells)
+            {
+                valueReturn[proci].append(Type());
+                continue;
+            }
+
+            valueReturn[proci].append
+            (
+                interpolator.interpolate(pointRecv[proci][idx], cellI)
+            );
+        }
+    }
+
+    PstreamBuffers valueBufs(Pstream::commsTypes::nonBlocking);
+
+    for (label proci = 0; proci < Pstream::nProcs(); proci++)
+    {
+        if (proci == myProc)
+        {
+            continue;
+        }
+
+        UOPstream sendVals(proci, valueBufs);
+        sendVals << valueReturn[proci];
+    }
+
+    valueBufs.finishedSends();
+
+    List<DynamicList<Type>> valueRecv(Pstream::nProcs());
+
+    for (label proci = 0; proci < Pstream::nProcs(); proci++)
+    {
+        if (proci == myProc)
+        {
+            continue;
+        }
+
+        UIPstream recvVals(proci, valueBufs);
+        valueRecv[proci] = DynamicList<Type>(recvVals);
+    }
+
+    valueBufs.clear();
+
+    forAll(valueRecv, proci)
+    {
+        if (proci == myProc)
+        {
+            continue;
+        }
+
+        const DynamicList<Tuple2<label, label>>& ownerList = owners[proci];
+
+        forAll(valueRecv[proci], idx)
+        {
+            if (idx >= ownerList.size())
+            {
+                break;
+            }
+
+            const Tuple2<label, label>& owner = ownerList[idx];
+
+            if
+            (
+                owner.first() < 0
+             || owner.first() >= intPoints.size()
+            )
+            {
+                continue;
+            }
+
+            List<intPoint>& slot = intPoints[owner.first()];
+
+            if
+            (
+                owner.second() < 0
+             || owner.second() >= slot.size()
+            )
+            {
+                continue;
+            }
+
+            setter(slot[owner.second()], valueRecv[proci][idx]);
+        }
+    }
+}
+
+template<class Setter>
+void gatherCellFieldParallel
+(
+    const fvMesh& mesh,
+    const scalarField& cellField,
+    List<List<intPoint>>& intPoints,
+    Setter&& setter
+)
+{
+    const label myProc = Pstream::myProcNo();
+    const label nCells = mesh.nCells();
+
+    List<DynamicList<Tuple2<label, label>>> owners(Pstream::nProcs());
+    List<DynamicList<label>> cellRequests(Pstream::nProcs());
+
+    forAll(intPoints, ibCellI)
+    {
+        List<intPoint>& intList = intPoints[ibCellI];
+
+        forAll(intList, iPoint)
+        {
+            intPoint& curPoint = intList[iPoint];
+
+            if (curPoint.iProc_ == myProc)
+            {
+                if (curPoint.iCell_ >= 0 && curPoint.iCell_ < nCells)
+                {
+                    setter(curPoint, cellField[curPoint.iCell_]);
+                }
+            }
+            else if (curPoint.iProc_ != -1)
+            {
+                cellRequests[curPoint.iProc_].append(curPoint.iCell_);
+                owners[curPoint.iProc_].append
+                (
+                    Tuple2<label, label>(ibCellI, iPoint)
+                );
+            }
+        }
+    }
+
+    PstreamBuffers cellBufs(Pstream::commsTypes::nonBlocking);
+
+    for (label proci = 0; proci < Pstream::nProcs(); ++proci)
+    {
+        if (proci == myProc)
+        {
+            continue;
+        }
+
+        UOPstream sendCells(proci, cellBufs);
+        sendCells << cellRequests[proci];
+    }
+
+    cellBufs.finishedSends();
+
+    List<DynamicList<label>> cellRecv(Pstream::nProcs());
+
+    for (label proci = 0; proci < Pstream::nProcs(); ++proci)
+    {
+        if (proci == myProc)
+        {
+            continue;
+        }
+
+        UIPstream recvCells(proci, cellBufs);
+        cellRecv[proci] = DynamicList<label>(recvCells);
+    }
+
+    cellBufs.clear();
+
+    List<DynamicList<scalar>> valueReturn(Pstream::nProcs());
+
+    forAll(cellRecv, proci)
+    {
+        if (proci == myProc)
+        {
+            continue;
+        }
+
+        const DynamicList<label>& requests = cellRecv[proci];
+        DynamicList<scalar>& responses = valueReturn[proci];
+
+        forAll(requests, idx)
+        {
+            const label cellI = requests[idx];
+
+            scalar response = 1.0;
+            if (cellI >= 0 && cellI < nCells)
+            {
+                response = cellField[cellI];
+            }
+
+            responses.append(response);
+        }
+    }
+
+    PstreamBuffers valueBufs(Pstream::commsTypes::nonBlocking);
+
+    for (label proci = 0; proci < Pstream::nProcs(); ++proci)
+    {
+        if (proci == myProc)
+        {
+            continue;
+        }
+
+        UOPstream sendVals(proci, valueBufs);
+        sendVals << valueReturn[proci];
+    }
+
+    valueBufs.finishedSends();
+
+    List<DynamicList<scalar>> valueRecv(Pstream::nProcs());
+
+    for (label proci = 0; proci < Pstream::nProcs(); ++proci)
+    {
+        if (proci == myProc)
+        {
+            continue;
+        }
+
+        UIPstream recvVals(proci, valueBufs);
+        valueRecv[proci] = DynamicList<scalar>(recvVals);
+    }
+
+    valueBufs.clear();
+
+    forAll(valueRecv, proci)
+    {
+        if (proci == myProc)
+        {
+            continue;
+        }
+
+        const DynamicList<Tuple2<label, label>>& ownerList = owners[proci];
+        const DynamicList<scalar>& values = valueRecv[proci];
+
+        forAll(values, idx)
+        {
+            if (idx >= ownerList.size())
+            {
+                break;
+            }
+
+            const Tuple2<label, label>& owner = ownerList[idx];
+
+            if
+            (
+                owner.first() < 0
+             || owner.first() >= intPoints.size()
+            )
+            {
+                continue;
+            }
+
+            List<intPoint>& slot = intPoints[owner.first()];
+
+            if
+            (
+                owner.second() < 0
+             || owner.second() >= slot.size()
+            )
+            {
+                continue;
+            }
+
+            setter(slot[owner.second()], values[idx]);
+        }
+    }
+}
+}
+
 //---------------------------------------------------------------------------//
 lineInt::lineInt(dictionary& interpDict):
-interpDict_(interpDict)
+interpDict_(interpDict),
+fluidFractionThreshold_
+(
+    Foam::max
+    (
+        scalar(0),
+        Foam::min
+        (
+            scalar(1),
+            interpDict.lookupOrDefault<scalar>("minFluidFraction", 0.5)
+        )
+    )
+)
 {}
 lineInt::~lineInt()
 {}
@@ -62,6 +439,25 @@ void lineInt::ibInterpolate
     );
 }
 //---------------------------------------------------------------------------//
+void lineInt::ibInterpolateScalar
+(
+    interpolationInfo& intpInfo,
+    volScalarField& Si,
+    const scalarField& ibPointsVal,
+    const Foam::fvMesh& mesh
+)
+{
+    lineIntInfo& lsInfo = dynamic_cast<lineIntInfo&>(intpInfo);
+
+    correctScalar
+    (
+        lsInfo,
+        Si,
+        ibPointsVal,
+        mesh
+    );
+}
+//---------------------------------------------------------------------------//
 void lineInt::correctVelocity
 (
     lineIntInfo& intpInfo,
@@ -75,7 +471,8 @@ void lineInt::correctVelocity
     List<point>& ibPoints = intpInfo.getIbPoints();
     List<List<intPoint>>& intPoints = intpInfo.getIntPoints();
 
-    getCurVelocity(intPoints);
+    getCurVelocity(intPoints, mesh);
+    updateFluidFractions(intPoints, mesh);
     List<label> intOrder = getIntOrder(intPoints);
 
     forAll(intPoints, ibp)
@@ -134,145 +531,264 @@ void lineInt::correctVelocity
     }
 }
 //---------------------------------------------------------------------------//
-void lineInt::getCurVelocity
+void lineInt::correctScalar
 (
-    List<List<intPoint>>& intPoints
+    lineIntInfo& intpInfo,
+    volScalarField& Si,
+    const scalarField& ibPointsVal,
+    const Foam::fvMesh& mesh
 )
 {
-    List<DynamicPointList> intPointToSync(Pstream::nProcs());
-    List<DynamicLabelList> cellLabelToSync(Pstream::nProcs());
-    List<DynamicList<Tuple2<label,label>>> indexesToSync(Pstream::nProcs());
+    const DynamicLabelList& cSurfCells = intpInfo.getSurfCells();
 
-    forAll(intPoints, ibCellI)
+    List<point>& ibPoints = intpInfo.getIbPoints();
+    List<List<intPoint>>& intPoints = intpInfo.getIntPoints();
+
+    getCurScalar(intPoints, mesh);
+    updateFluidFractions(intPoints, mesh);
+    List<label> intOrder = getIntOrder(intPoints);
+
+    if (ibPointsVal.empty())
     {
-        forAll(intPoints[ibCellI], iPoint)
-        {
-            intPoint& curIPoint = intPoints[ibCellI][iPoint];
+        return;
+    }
 
-            if(curIPoint.iProc_ == Pstream::myProcNo())
+    forAll(intPoints, ibp)
+    {
+        label cellI = cSurfCells[ibp];
+
+        switch(intOrder[ibp])
+        {
+            case 0:
             {
-                curIPoint.iVel_ =  interpV_->interpolate(
-                    curIPoint.iPoint_,
-                    curIPoint.iCell_
-                );
+                Si[cellI] = ibPointsVal[ibp];
+                break;
             }
-            else
+
+            case 1:
             {
-                if(curIPoint.iProc_ != -1)
-                {
-                    intPointToSync[curIPoint.iProc_].append(curIPoint.iPoint_);
-                    cellLabelToSync[curIPoint.iProc_].append(curIPoint.iCell_);
-                    indexesToSync[curIPoint.iProc_].append(
-                        Tuple2<label,label>(ibCellI, iPoint)
-                    );
-                }
+                scalar SP1 = intPoints[ibp][0].iScalar_ - ibPointsVal[ibp];
+
+                scalar deltaR = mag(intPoints[ibp][0].iPoint_ - ibPoints[ibp]);
+                scalar ds = mag(mesh.C()[cellI] - ibPoints[ibp]);
+
+                scalar linCoeff = SP1/(deltaR + SMALL);
+
+                Si[cellI] = linCoeff*ds + ibPointsVal[ibp];
+                break;
             }
-        }
-    }
 
-    PstreamBuffers pBufsIntP(Pstream::commsTypes::nonBlocking);
-    PstreamBuffers pBufsIntC(Pstream::commsTypes::nonBlocking);
+            case 2:
+            {
+                scalar SP1 = intPoints[ibp][0].iScalar_ - ibPointsVal[ibp];
+                scalar SP2 = intPoints[ibp][1].iScalar_ - ibPointsVal[ibp];
 
-    for (label proci = 0; proci < Pstream::nProcs(); proci++)
-    {
-        if(proci != Pstream::myProcNo())
-        {
-            UOPstream sendIntP(proci, pBufsIntP);
-            UOPstream sendIntC(proci, pBufsIntC);
+                scalar deltaR1 = mag(intPoints[ibp][0].iPoint_ - ibPoints[ibp]);
+                scalar deltaR2 = mag(intPoints[ibp][1].iPoint_ - intPoints[ibp][0].iPoint_);
+                scalar ds = mag(mesh.C()[cellI] - ibPoints[ibp]);
 
-            sendIntP << intPointToSync[proci];
-            sendIntC << cellLabelToSync[proci];
-        }
-    }
+                scalar quadCoeff = (SP2 - SP1)*deltaR1 - SP1*deltaR2;
+                quadCoeff       /= (deltaR1*deltaR2*(deltaR1 + deltaR2) + SMALL);
 
-    pBufsIntP.finishedSends();
-    pBufsIntC.finishedSends();
+                scalar linCoeff  = (SP1 - SP2)*Foam::pow(deltaR1, 2.0);
+                linCoeff        += 2.0*SP1*deltaR1*deltaR2;
+                linCoeff        += SP1*Foam::pow(deltaR2, 2.0);
+                linCoeff        /= (deltaR1*deltaR2*(deltaR1 + deltaR2) + SMALL);
 
-    List<DynamicPointList> intPRecv(Pstream::nProcs());
-    List<DynamicLabelList> intCRecv(Pstream::nProcs());
-
-    for (label proci = 0; proci < Pstream::nProcs(); proci++)
-    {
-        if (proci != Pstream::myProcNo())
-        {
-            UIPstream recvIntP(proci, pBufsIntP);
-            UIPstream recvIntC(proci, pBufsIntC);
-
-            DynamicPointList recIntP (recvIntP);
-            DynamicLabelList recIntC (recvIntC);
-
-            intPRecv[proci] = recIntP;
-            intCRecv[proci] = recIntC;
-        }
-    }
-
-    pBufsIntP.clear();
-    pBufsIntC.clear();
-
-    List<DynamicVectorList> intVelRtrn(Pstream::nProcs());
-
-    forAll(intPRecv, proci)
-    {
-        forAll(intPRecv[proci], pi)
-        {
-            intVelRtrn[proci].append(
-                interpV_->interpolate(
-                    intPRecv[proci][pi],
-                    intCRecv[proci][pi]
-            ));
-        }
-    }
-
-    for (label proci = 0; proci < Pstream::nProcs(); proci++)
-    {
-        if(proci != Pstream::myProcNo())
-        {
-            UOPstream sendIntV(proci, pBufsIntP);
-
-            sendIntV << intVelRtrn[proci];
-        }
-    }
-
-    pBufsIntP.finishedSends();
-
-    List<DynamicVectorList> intVelRcv(Pstream::nProcs());
-
-    for (label proci = 0; proci < Pstream::nProcs(); proci++)
-    {
-        if (proci != Pstream::myProcNo())
-        {
-            UIPstream recvIntV(proci, pBufsIntP);
-
-            DynamicVectorList recIntV (recvIntV);
-
-            intVelRcv[proci] = recIntV;
-        }
-    }
-
-    pBufsIntP.clear();
-
-    forAll(intVelRcv, proci)
-    {
-        forAll(intVelRcv[proci], pi)
-        {
-            Tuple2<label, label> cInd = indexesToSync[proci][pi];
-            intPoints[cInd.first()][cInd.second()].iVel_ = intVelRcv[proci][pi];
+                Si[cellI] = quadCoeff*ds*ds + linCoeff*ds + ibPointsVal[ibp];
+                break;
+            }
         }
     }
 }
 //---------------------------------------------------------------------------//
+void lineInt::getCurVelocity
+(
+    List<List<intPoint>>& intPoints,
+    const fvMesh& mesh
+)
+{
+    if (Pstream::master())
+    {
+        Info<< "lineInt::getCurVelocity start" << endl;
+    }
+
+    if (!interpV_.valid())
+    {
+        label pending = 0;
+
+        forAll(intPoints, ibCellI)
+        {
+            forAll(intPoints[ibCellI], iPoint)
+            {
+                const intPoint& curPoint = intPoints[ibCellI][iPoint];
+
+                if
+                (
+                    curPoint.iProc_ != -1
+                 && curPoint.iProc_ != Pstream::myProcNo()
+                )
+                {
+                    ++pending;
+                }
+            }
+        }
+
+        if (pending)
+        {
+            Info<< "lineInt::getCurVelocity proc " << Pstream::myProcNo()
+                << " missing velocity interpolator with " << pending
+                << " remote requests" << endl;
+        }
+
+        return;
+    }
+
+    interpolateIntPointsParallel<vector>
+    (
+        mesh,
+        *interpV_,
+        intPoints,
+        [](intPoint& target, const vector& value)
+        {
+            target.iVel_ = value;
+        }
+    );
+
+    if (Pstream::master())
+    {
+        Info<< "lineInt::getCurVelocity end" << endl;
+    }
+}
+//---------------------------------------------------------------------------//
+void lineInt::getCurScalar
+(
+    List<List<intPoint>>& intPoints,
+    const fvMesh& mesh
+)
+{
+    if (Pstream::master())
+    {
+        Info<< "lineInt::getCurScalar start" << endl;
+    }
+
+    if (!interpS_.valid())
+    {
+        label pending = 0;
+
+        forAll(intPoints, ibCellI)
+        {
+            forAll(intPoints[ibCellI], iPoint)
+            {
+                const intPoint& curPoint = intPoints[ibCellI][iPoint];
+
+                if
+                (
+                    curPoint.iProc_ != -1
+                 && curPoint.iProc_ != Pstream::myProcNo()
+                )
+                {
+                    ++pending;
+                }
+            }
+        }
+
+        if (pending)
+        {
+            Info<< "lineInt::getCurScalar proc " << Pstream::myProcNo()
+                << " missing scalar interpolator with " << pending
+                << " remote requests" << endl;
+        }
+        return;
+    }
+
+    interpolateIntPointsParallel<scalar>
+    (
+        mesh,
+        *interpS_,
+        intPoints,
+        [](intPoint& target, const scalar value)
+        {
+            target.iScalar_ = value;
+        }
+    );
+
+    if (Pstream::master())
+    {
+        Info<< "lineInt::getCurScalar end" << endl;
+    }
+}
+//---------------------------------------------------------------------------//
+void lineInt::updateFluidFractions
+(
+    List<List<intPoint>>& intPoints,
+    const fvMesh& mesh
+)
+{
+    forAll(intPoints, ibp)
+    {
+        List<intPoint>& pointList = intPoints[ibp];
+        forAll(pointList, ip)
+        {
+            pointList[ip].fluidFraction_ = 1.0;
+        }
+    }
+
+    if (!mesh.foundObject<volScalarField>("lambda"))
+    {
+        return;
+    }
+
+    const volScalarField& lambdaField =
+        mesh.lookupObject<volScalarField>("lambda");
+    const scalarField& lambdaIF = lambdaField.internalField();
+
+    forAll(intPoints, ibp)
+    {
+        List<intPoint>& pointList = intPoints[ibp];
+        forAll(pointList, ip)
+        {
+            pointList[ip].fluidFraction_ = 0.0;
+        }
+    }
+
+    gatherCellFieldParallel
+    (
+        mesh,
+        lambdaIF,
+        intPoints,
+        [](intPoint& target, const scalar lambdaVal)
+        {
+            const scalar clipped = Foam::min
+            (
+                scalar(1),
+                Foam::max(scalar(0), lambdaVal)
+            );
+            target.fluidFraction_ = scalar(1) - clipped;
+        }
+    );
+}
+//---------------------------------------------------------------------------//
 List<label> lineInt::getIntOrder
 (
-    List<List<intPoint>>& intPoints
-)
+    const List<List<intPoint>>& intPoints
+) const
 {
     List<label> intOrderToRtn(intPoints.size(), 0);
 
     forAll(intPoints, ibp)
     {
-        forAll(intPoints[ibp], ip)
+        const List<intPoint>& pointList = intPoints[ibp];
+
+        forAll(pointList, ip)
         {
-            if(intPoints[ibp][ip].iProc_ != -1)
+            const intPoint& curPoint = pointList[ip];
+
+            if
+            (
+                curPoint.iProc_ != -1
+             && curPoint.fluidFraction_ > fluidFractionThreshold_
+            )
             {
                 ++intOrderToRtn[ibp];
             }

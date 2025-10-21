@@ -129,6 +129,13 @@ namespace Foam
         {
             return intVelocPtr_();
         }
+
+        void clearIntpInfo() override
+        {
+            interpolationInfo::clearIntpInfo();
+            intPointsPtr_.clear();
+            intVelocPtr_.clear();
+        }
     };
 }
 #endif

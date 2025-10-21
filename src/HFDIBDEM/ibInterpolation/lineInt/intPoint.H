@@ -46,6 +46,8 @@ namespace Foam
         label iCell_ = 0;
         label iProc_ = -1;
         vector iVel_ = vector::zero;
+        scalar iScalar_ = 0.0;
+    scalar fluidFraction_ = 1.0;
 
         intPoint():
         iPoint_(vector::zero),

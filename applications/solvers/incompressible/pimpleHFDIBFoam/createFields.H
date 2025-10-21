@@ -28,6 +28,49 @@ volVectorField U
     mesh
 );
 
+InfoH<< "Reading field T\n" << endl;
+volScalarField T
+(
+    IOobject
+    (
+        "T",
+        runTime.timeName(),
+        mesh,
+        IOobject::MUST_READ,
+        IOobject::AUTO_WRITE
+    ),
+    mesh
+);
+
+InfoH<< "Reading field Ti\n" << endl;
+volScalarField Ti
+(
+    IOobject
+    (
+        "Ti",
+        runTime.timeName(),
+        mesh,
+        IOobject::READ_IF_PRESENT,
+        IOobject::AUTO_WRITE
+    ),
+    T
+);
+
+InfoH<< "Reading field Tq\n" << endl;
+volScalarField Tq
+(
+    IOobject
+    (
+        "Tq",
+        runTime.timeName(),
+        mesh,
+        IOobject::READ_IF_PRESENT,
+        IOobject::AUTO_WRITE
+    ),
+    mesh,
+    dimensionedScalar("zero", T.dimensions()/dimTime, 0.0)
+);
+
 InfoH<< "Reading field Ui\n" << endl;
 volVectorField Ui
 (
@@ -99,6 +142,24 @@ volScalarField surface
     ),
     mesh,
     dimensionedScalar("zero",dimless,0)
+);
+
+InfoH<< "Reading transportProperties (thermal)\n" << endl;
+IOdictionary transportPropertiesDict
+(
+    IOobject
+    (
+        "transportProperties",
+        runTime.constant(),
+        mesh,
+        IOobject::MUST_READ_IF_MODIFIED,
+        IOobject::NO_WRITE
+    )
+);
+
+dimensionedScalar DT
+(
+    transportPropertiesDict.lookup("DT")
 );
 
 #include "createPhi.H"

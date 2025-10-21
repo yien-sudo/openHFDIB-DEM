@@ -1,16 +1,24 @@
 #!/bin/sh
+
 . $WM_PROJECT_DIR/bin/tools/RunFunctions
 
-rm -rf 0
+foamListTimes -rm > /dev/null 2>&1
+
+rm -rf 0 processor*
 
 cp -r 0.org 0
 
-
-runApplication blockMesh
+blockMesh 2>&1 | tee log.blockMesh
 
 application=`getApplication`
+nProcs=`foamDictionary -entry numberOfSubdomains -value system/decomposeParDict`
 
-runApplication $application
+decomposePar -force 2>&1 | tee log.decomposePar
+
+mpirun -np $nProcs $application -parallel 2>&1 | tee log.$application
+
+reconstructParMesh -latestTime 2>&1 | tee log.reconstructParMesh
+reconstructPar -latestTime 2>&1 | tee log.reconstructPar
 
 
 # ----------------------------------------------------------------- end-of-file

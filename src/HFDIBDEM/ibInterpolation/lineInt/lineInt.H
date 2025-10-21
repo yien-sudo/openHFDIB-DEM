@@ -60,7 +60,9 @@ namespace Foam
         typedef DynamicList<point> DynamicPointList;
 
         autoPtr<interpolation<vector>> interpV_;
+        autoPtr<interpolation<scalar>> interpS_;
         dictionary& interpDict_;
+    scalar fluidFractionThreshold_;
 
         void correctVelocity
         (
@@ -70,15 +72,36 @@ namespace Foam
             const Foam::fvMesh& mesh
         );
 
+        void correctScalar
+        (
+            lineIntInfo& intpInfo,
+            volScalarField& Si,
+            const scalarField& ibPointsVal,
+            const Foam::fvMesh& mesh
+        );
+
         void getCurVelocity
         (
-            List<List<intPoint>>& intPoints
+            List<List<intPoint>>& intPoints,
+            const Foam::fvMesh& mesh
+        );
+
+        void getCurScalar
+        (
+            List<List<intPoint>>& intPoints,
+            const Foam::fvMesh& mesh
+        );
+
+        void updateFluidFractions
+        (
+            List<List<intPoint>>& intPoints,
+            const Foam::fvMesh& mesh
         );
 
         List<label> getIntOrder
         (
-            List<List<intPoint>>& intPoints
-        );
+            const List<List<intPoint>>& intPoints
+        ) const;
 
         public:
 
@@ -93,11 +116,24 @@ namespace Foam
             interpV_ = interpolation<vector>::New(interpDict_, V);
         }
 
+        void resetScalarInterpolator(volScalarField& S) override
+        {
+            interpS_ = interpolation<scalar>::New(interpDict_, S);
+        }
+
         void ibInterpolate
         (
             interpolationInfo& intpInfo,
             volVectorField& Ui,
             vectorField ibPointsVal,
+            const Foam::fvMesh& mesh
+        ) override;
+
+        void ibInterpolateScalar
+        (
+            interpolationInfo& intpInfo,
+            volScalarField& Si,
+            const scalarField& ibPointsVal,
             const Foam::fvMesh& mesh
         ) override;
 

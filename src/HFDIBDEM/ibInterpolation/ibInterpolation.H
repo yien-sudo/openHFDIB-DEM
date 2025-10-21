@@ -41,6 +41,7 @@ Contributors
 
 //#include "leastSquaresInt.H"
 #include "interpolationInfo.H"
+#include "volFieldsFwd.H"
 
 namespace Foam
 {
@@ -61,12 +62,22 @@ namespace Foam
 
         virtual void resetInterpolator(volVectorField& V){};
 
+        virtual void resetScalarInterpolator(volScalarField& S){}
+
         virtual void ibInterpolate(
             interpolationInfo& intpInfo,
             volVectorField& Ui,
             vectorField ibPointsVal,
             const Foam::fvMesh& mesh
         ) = 0;
+
+        virtual void ibInterpolateScalar(
+            interpolationInfo& intpInfo,
+            volScalarField& Si,
+            const scalarField& ibPointsVal,
+            const Foam::fvMesh& mesh
+        )
+        {}
 
         virtual interpolationInfo* createIntpInfo
         (

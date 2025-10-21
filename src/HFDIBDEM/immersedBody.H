@@ -133,6 +133,40 @@ namespace Foam
         // fluid density
         dimensionedScalar rhoF_;
 
+        // kinematic viscosity of the carrier phase
+        dimensionedScalar nuF_;
+
+        // thermal diffusivity of the carrier phase
+        dimensionedScalar DTF_;
+
+        // thermal coupling flags and state
+        bool    hasThermalBC_;
+        bool    thermalDynamic_;
+        bool    thermalConfigAvailable_;
+        bool    computeNu_;
+        bool    bulkTemperatureFixed_;
+
+        // particle thermal state
+        scalar  particleTemperature_;
+        scalar  surfaceTemperature_;
+        scalar  bulkTemperature_;
+
+        // material properties for heat transfer
+        scalar  cpParticle_;
+        scalar  cpFluid_;
+        scalar  kFluid_;
+
+        // derived diagnostics
+        scalar  totalHeatFlux_;
+        scalar  nusseltNumber_;
+        scalar  heatTransferCoefficient_;
+        scalar  interfaceFluidTemperature_;
+        scalar  referenceDiameter_;
+        scalar  referenceArea_;
+        scalar  minDeltaT_;
+        scalar  solidFractionThreshold_;
+        bool    thermalDebug_;
+
         // integer to identify current body
         label   bodyId_;
 
@@ -346,6 +380,31 @@ namespace Foam
             volScalarField& body
         );
 
+        // update imposed scalar field
+        void updateScalarField
+        (
+            volScalarField& VS,
+            word fieldName,
+            volScalarField& body
+        );
+
+        bool getThermalDynamic() const
+        {
+            return thermalDynamic_;
+        }
+
+        void markSurfaceCells(volScalarField& mask) const;
+        void markInterfaceCells(volScalarField& mask) const;
+
+        // update particle thermal state using the forcing term from the
+        // scalar equation (e.g., temperature)
+        void updateThermalState
+        (
+            const volScalarField& field,
+            const volScalarField& solidForcing,
+            const volScalarField& interfaceForcing
+        );
+
         // update contact forces
         void updateContactForces
         (
@@ -389,7 +448,7 @@ namespace Foam
         }
 
         void switchActiveOff(volScalarField& body);
-        const bool& getIsActive()
+        const bool& getIsActive() const
         {
             return isActive_;
         }
@@ -482,6 +541,25 @@ namespace Foam
             dict.add("timeStepsInContWStatic", ibContactClass_
                 ->getTimeStepsInContWStatic());
             geomModel_->writeBodyInfo(bodyId_,dict, path);
+
+            if (hasThermalBC_)
+            {
+                dict.add("thermalHasBC", hasThermalBC_);
+                dict.add("thermalDynamic", thermalDynamic_);
+                dict.add("thermalSurfaceTemperature", surfaceTemperature_);
+                dict.add("thermalParticleTemperature", particleTemperature_);
+                dict.add("thermalBulkTemperature", bulkTemperature_);
+                dict.add(
+                    "thermalInterfaceTemperature",
+                    interfaceFluidTemperature_
+                );
+                dict.add("thermalTotalHeatFlux", totalHeatFlux_);
+                dict.add(
+                    "thermalHeatTransferCoefficient",
+                    heatTransferCoefficient_
+                );
+                dict.add("thermalNusselt", nusseltNumber_);
+            }
         }
 
         // update old movement variables for fluid-solid coupling
@@ -502,6 +580,12 @@ namespace Foam
         }
 
         vectorField getUatIbPoints();
+
+        scalarField getScalarDirichletValues
+        (
+            const volScalarField& field,
+            const word& fieldName
+        );
     };
 }
 #endif

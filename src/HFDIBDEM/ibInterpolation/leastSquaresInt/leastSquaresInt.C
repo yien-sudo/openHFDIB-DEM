@@ -73,6 +73,33 @@ void leastSquaresInt::ibInterpolate
     );
 }
 //---------------------------------------------------------------------------//
+void leastSquaresInt::ibInterpolateScalar
+(
+    interpolationInfo& intpInfo,
+    volScalarField& Si,
+    const scalarField& ibPointsVal,
+    const Foam::fvMesh& mesh
+)
+{
+    leastSquaresIntInfo& lsInfo
+        = dynamic_cast<leastSquaresIntInfo&>(intpInfo);
+
+    const DynamicLabelList& ibCells = lsInfo.getSurfCells();
+
+    if (ibCells.empty() || ibCells.size() != ibPointsVal.size())
+    {
+        return;
+    }
+
+    imposeScalarDirichlet
+    (
+        lsInfo,
+        Si,
+        ibPointsVal,
+        mesh
+    );
+}
+//---------------------------------------------------------------------------//
 void leastSquaresInt::imposeDirichletCondition
 (
     leastSquaresIntInfo& intpInfo,
@@ -111,7 +138,6 @@ void leastSquaresInt::imposeDirichletCondition
         {
             label curCell = ibCells[cellI];
             const labelList& curCells = cellCells[cellI];
-            const scalarRectangularMatrix& curInvMatrix = cInvDirMats[cellI];
 
             if(curCells.size() < nCoeffs)
             {
@@ -119,6 +145,7 @@ void leastSquaresInt::imposeDirichletCondition
             }
             else
             {
+                const scalarRectangularMatrix& curInvMatrix = cInvDirMats[cellI];
                 vectorField coeffs(nCoeffs, vector::zero);
                 vectorField source(curCells.size(), vector::zero);
 
@@ -202,6 +229,146 @@ void leastSquaresInt::imposeDirichletCondition
         }
 
     } while(maxError > 0.01 && counter < 5);
+}
+//---------------------------------------------------------------------------//
+void leastSquaresInt::imposeScalarDirichlet
+(
+    leastSquaresIntInfo& intpInfo,
+    volScalarField& Si,
+    const scalarField& ibPointsVal,
+    const Foam::fvMesh& mesh
+)
+{
+    const DynamicLabelList& ibCells = intpInfo.getSurfCells();
+    const List<point>& ibPoints = intpInfo.getIbPoints();
+    const List<vector>& ibNormals = intpInfo.getIbNormals();
+    const labelListList& cellCells = intpInfo.getCellCells();
+    const PtrList<scalarRectangularMatrix>& cInvDirMats =
+        intpInfo.getInvDirMats();
+
+    autoPtr<scalarField> tpolyS(new scalarField(Si.internalField(), ibCells));
+    scalarField& polyS = tpolyS();
+
+    const vectorField& C = mesh_.cellCentres();
+
+    label nCoeffs = 5;
+    if (case3D)
+    {
+        nCoeffs += 4;
+    }
+
+    scalarField error(ibCells.size(), 0.0);
+    scalar maxError = 0.0;
+    label counter = 0;
+
+    do
+    {
+        counter++;
+        scalar maxMagPolyS = 0.0;
+
+        forAll(ibCells, cellI)
+        {
+            label curCell = ibCells[cellI];
+            const labelList& curCells = cellCells[cellI];
+
+            if (curCells.size() < nCoeffs)
+            {
+                continue;
+            }
+
+            const scalarRectangularMatrix& curInvMatrix = cInvDirMats[cellI];
+
+            scalarField coeffs(nCoeffs, 0.0);
+            scalarField source(curCells.size(), 0.0);
+
+            forAll(curCells, idx)
+            {
+                source[idx] = Si[curCells[idx]] - ibPointsVal[cellI];
+            }
+
+            for (label i = 0; i < nCoeffs; ++i)
+            {
+                for (label j = 0; j < source.size(); ++j)
+                {
+                    coeffs[i] += curInvMatrix[i][j]*source[j];
+                }
+            }
+
+            scalar oldPolyS = polyS[cellI];
+            vector R = C[curCell] - ibPoints[cellI];
+
+            if ((R & ibNormals[cellI]) < 0)
+            {
+                R = vector::zero;
+            }
+
+            if (case3D)
+            {
+                polyS[cellI] = ibPointsVal[cellI]
+                    + coeffs[0]*R.x()
+                    + coeffs[1]*R.y()
+                    + coeffs[2]*R.x()*R.y()
+                    + coeffs[3]*sqr(R.x())
+                    + coeffs[4]*sqr(R.y())
+                    + coeffs[5]*R.z()
+                    + coeffs[6]*R.x()*R.z()
+                    + coeffs[7]*R.y()*R.z()
+                    + coeffs[8]*sqr(R.z());
+            }
+            else
+            {
+                labelList A(2, 0.0);
+                label validDim = 0;
+                for (label dim = 0; dim < 3; ++dim)
+                {
+                    if (dim != emptyDim)
+                    {
+                        A[validDim++] = dim;
+                    }
+                }
+
+                scalarList dists(3, 0.0);
+                dists[0] = R.x();
+                dists[1] = R.y();
+                dists[2] = R.z();
+
+                polyS[cellI] = ibPointsVal[cellI]
+                    + coeffs[0]*dists[A[0]]
+                    + coeffs[1]*dists[A[1]]
+                    + coeffs[2]*dists[A[0]]*dists[A[1]]
+                    + coeffs[3]*sqr(dists[A[0]])
+                    + coeffs[4]*sqr(dists[A[1]]);
+            }
+
+            error[cellI] = mag(polyS[cellI] - oldPolyS);
+        }
+
+        forAll(ibCells, ci)
+        {
+            Si[ibCells[ci]] = polyS[ci];
+        }
+
+        if (!polyS.empty())
+        {
+            maxMagPolyS = max(mag(polyS));
+        }
+        else
+        {
+            maxMagPolyS = 0.0;
+        }
+
+        error /= maxMagPolyS + SMALL;
+
+        if (!error.empty())
+        {
+            maxError = max(error);
+        }
+        else
+        {
+            maxError = 0.0;
+        }
+
+    } while (maxError > 0.01 && counter < 5);
 }
 //---------------------------------------------------------------------------//
 void leastSquaresInt::adjustPhi

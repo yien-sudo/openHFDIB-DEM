@@ -21,33 +21,34 @@ internalField   uniform (0 0 0);
 
 boundaryField
 {
-  x0
-  {
-      type            zeroGradient;
-  }
-  x1
+  xMin
   {
     type            zeroGradient;
   }
 
-  z0
+  xMax
   {
-      //~ type            symmetry;
-        type            zeroGradient;
+    type            zeroGradient;
   }
 
-  z1
+  yMin
   {
-      //~ type            symmetry;
-      type            zeroGradient;
-
+    type            zeroGradient;
   }
 
-
-  frontAndBack
+  yMax
   {
-      //~ type            zeroGradient;
-      type            zeroGradient;
+    type            zeroGradient;
+  }
+
+  bottom
+  {
+    type            cyclic;
+  }
+
+  top
+  {
+    type            cyclic;
   }
 }
 

@@ -15,36 +15,23 @@ FoamFile
 // * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * //
 
 convertToMeters 0.01;
-xInlet 0;
-xOutlet  12;
-xResolution 100;
-
-ycStart -0.05;
-ycyclicLength  0.05; //dp = 2, i.e., 4 diameters per box
-ycyclicResolution 1;
-
-zcStart -3;
-zcyclicLength  3; //dp = 2, i.e., 4 diameters per box
-
-zcyclicResolution 50;
-
-
 
 vertices
 (
-  ($xInlet  $ycStart       $zcStart)
-  ($xOutlet $ycStart       $zcStart)
-  ($xOutlet $ycyclicLength $zcStart)
-  ($xInlet  $ycyclicLength $zcStart)
-  ($xInlet  $ycStart       $zcyclicLength)
-  ($xOutlet $ycStart       $zcyclicLength)
-  ($xOutlet $ycyclicLength $zcyclicLength)
-  ($xInlet  $ycyclicLength $zcyclicLength)
+    (0      0      0)
+    (8      0      0)
+    (8      8      0)
+    (0      8      0)
+    (0      0     80)
+    (8      0     80)
+    (8      8     80)
+    (0      8     80)
 );
 
 blocks
 (
-  hex (0 1 2 3 4 5 6 7) ($xResolution $ycyclicResolution $zcyclicResolution) simpleGrading (1 1 1)
+    // dp/h = 10 -> cell size = 0.1 (in blockMesh units)
+    hex (0 1 2 3 4 5 6 7) (64 64 640) simpleGrading (1 1 1)
 );
 
 edges
@@ -53,56 +40,61 @@ edges
 
 boundary
 (
-  z1
-{
-  type wall;
-  faces
-  (
-   (4 5 6 7)
-  );
-}
+  bottom
+  {
+    type cyclic;
+    neighbourPatch top;
+    faces
+    (
+      (0 1 2 3)
+    );
+  }
 
-z0
-{
-  type wall;
-  faces
-  (
-   (0 3 2 1)
-  );
-}
+  top
+  {
+    type cyclic;
+    neighbourPatch bottom;
+    faces
+    (
+      (4 5 6 7)
+    );
+  }
 
-x1
-{
-type wall;
-neighbourPatch x0;
-  faces
-  (
-  (2 6 5 1)
- );
-}
+  xMin
+  {
+    type wall;
+    faces
+    (
+      (0 3 7 4)
+    );
+  }
 
-x0
-{
-type patch;
-neighbourPatch x1;
-  faces
-  (
-  (0 4 7 3)
-  );
-}
+  xMax
+  {
+    type wall;
+    faces
+    (
+      (1 5 6 2)
+    );
+  }
 
-frontAndBack
- {
-  type patch;
-     faces
-     (
-     (3 7 6 2)
-     (1 5 4 0)
-     );
- }
+  yMin
+  {
+    type wall;
+    faces
+    (
+      (0 1 5 4)
+    );
+  }
 
-
-
+  yMax
+  {
+    type wall;
+    faces
+    (
+      (3 2 6 7)
+    );
+  }
 );
 
 mergePatchPairs

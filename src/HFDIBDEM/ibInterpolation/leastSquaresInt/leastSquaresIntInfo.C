@@ -71,7 +71,7 @@ void leastSquaresIntInfo::setIntpInfo()
     forAll(cellCells, cellI)
     {
         labelList currCells;
-        scalar centerMeanDist;
+        scalar centerMeanDist = 0;
         findCellCells
         (
             cSurfCells[cellI],

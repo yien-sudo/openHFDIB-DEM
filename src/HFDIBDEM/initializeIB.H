@@ -164,3 +164,136 @@ if (mesh_.nGeometricD() < 3)
         ibContactClass_(),
         ibCntVars_()
     ));
+
+    if (immersedDict_.found("T"))
+    {
+        hasThermalBC_ = true;
+
+        const dictionary& thermalDict = immersedDict_.subDict("T");
+
+        scalar boundaryValue = 0.0;
+        if (thermalDict.found("value"))
+        {
+            boundaryValue = readScalar(thermalDict.lookup("value"));
+        }
+
+        scalar innerValue = boundaryValue;
+        if (thermalDict.found("innerValue"))
+        {
+            innerValue = readScalar(thermalDict.lookup("innerValue"));
+        }
+
+        surfaceTemperature_ = boundaryValue;
+        particleTemperature_ = innerValue;
+        if (thermalDict.found("bulkTemperature"))
+        {
+            bulkTemperature_ = readScalar(thermalDict.lookup("bulkTemperature"));
+            bulkTemperatureFixed_ = true;
+        }
+        else
+        {
+            bulkTemperature_ = boundaryValue;
+            bulkTemperatureFixed_ = false;
+        }
+
+        thermalDynamic_ = thermalDict.lookupOrDefault<bool>("dynamic", false);
+        computeNu_ = thermalDict.lookupOrDefault<bool>("computeNu", false);
+    thermalDebug_ = thermalDict.lookupOrDefault<bool>("thermalDebug", false);
+
+        cpParticle_ = thermalDict.lookupOrDefault<scalar>("cpParticle", 0.0);
+        cpFluid_ = thermalDict.lookupOrDefault<scalar>("cpFluid", 0.0);
+        kFluid_ = thermalDict.lookupOrDefault<scalar>("lambdaFluid", 0.0);
+
+        referenceDiameter_ = thermalDict.lookupOrDefault<scalar>
+        (
+            "characteristicLength",
+            getDC()
+        );
+
+        referenceArea_ = thermalDict.lookupOrDefault<scalar>(
+            "referenceArea",
+            0.0
+        );
+
+        minDeltaT_ = Foam::max
+        (
+            thermalDict.lookupOrDefault<scalar>("minDeltaT", minDeltaT_),
+            SMALL
+        );
+
+        solidFractionThreshold_ = Foam::max
+        (
+            Foam::min
+            (
+                thermalDict.lookupOrDefault<scalar>
+                (
+                    "solidFractionThreshold",
+                    solidFractionThreshold_
+                ),
+                1.0
+            ),
+            0.0
+        );
+
+        if (kFluid_ <= SMALL && cpFluid_ > SMALL)
+        {
+            kFluid_ = rhoF_.value()*cpFluid_*DTF_.value();
+        }
+        else if (cpFluid_ <= SMALL && kFluid_ > SMALL)
+        {
+            cpFluid_ = kFluid_/(rhoF_.value()*DTF_.value());
+        }
+
+        thermalConfigAvailable_ = (cpFluid_ > SMALL);
+
+        if (!thermalConfigAvailable_)
+        {
+            if (thermalDynamic_ || computeNu_)
+            {
+                InfoH << iB_Info
+                      << "Thermal properties for body " << bodyName_
+                      << " are incomplete (cpFluid missing)."
+                      << " Thermal forcing diagnostics disabled." << endl;
+            }
+            thermalDynamic_ = false;
+            computeNu_ = false;
+        }
+
+        if (thermalDynamic_ && cpParticle_ <= SMALL)
+        {
+            InfoH << iB_Info
+                  << "Particle heat capacity cpParticle missing for body "
+                  << bodyName_ << ". Disabling thermal evolution." << endl;
+            thermalDynamic_ = false;
+        }
+
+        if (computeNu_ && kFluid_ <= SMALL)
+        {
+            InfoH << iB_Info
+                  << "Thermal conductivity kFluid missing for body "
+                  << bodyName_ << ". Nusselt number output disabled." << endl;
+            computeNu_ = false;
+        }
+
+        if (referenceDiameter_ <= SMALL)
+        {
+            const scalar rhoSolid = geomModel_->getRhoS().value();
+            const scalar massSolid = geomModel_->getM0();
+            if (rhoSolid > SMALL && massSolid > SMALL)
+            {
+                const scalar volume = massSolid/rhoSolid;
+                if (volume > SMALL)
+                {
+                    referenceDiameter_ = std::cbrt(
+                        6.0*volume/(Foam::constant::mathematical::pi)
+                    );
+                }
+            }
+        }
+
+        if (referenceArea_ <= SMALL && referenceDiameter_ > SMALL)
+        {
+            referenceArea_ = Foam::constant::mathematical::pi
+                *sqr(referenceDiameter_);
+        }
+    }

@@ -81,12 +81,18 @@ HFDIBDEM.interpolateIB(U,Ui,lambda);
 
 //Ui -= (Ui - U)*(1-lambda);
 
+const scalar solidMaskThreshold = 0.999;
+
 forAll(surface, sI)
 {
-    if (lambda[sI] > 0)
+    if (lambda[sI] >= solidMaskThreshold)
+    {
         surface[sI] = 1;
+    }
     else
+    {
         surface[sI] = 0;
+    }
 }
 
 f += 0.8*surface*(Ui - U)/runTime.deltaT();

@@ -6,4 +6,8 @@ cd ${0%/*} || exit 1    # run from this directory
 
 cleanCase
 
+# Remove immersed-body diagnostics
+rm -rf bodiesInfo
+mkdir -p bodiesInfo
+
 # ----------------------------------------------------------------- end-of-file

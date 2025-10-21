@@ -46,8 +46,12 @@ Contributors
 #include "PstreamReduceOps.H"
 
 #include "fvcSmooth.H"
+#include "fvcLaplacian.H"
+#include "fvcGrad.H"
 #include "fvMeshSubset.H"
 #include "solverInfo.H" 
+#include <cmath>
+#include "mathematicalConstants.H"
 
 #define ORDER 2
 
@@ -85,6 +89,28 @@ alpha_(vector::zero),
 totalAngle_(vector::zero),
 CoNum_(0.0),
 rhoF_(transportProperties_.lookup("rho")),
+nuF_(transportProperties_.lookup("nu")),
+DTF_(transportProperties_.lookup("DT")),
+hasThermalBC_(false),
+thermalDynamic_(false),
+thermalConfigAvailable_(false),
+computeNu_(false),
+bulkTemperatureFixed_(false),
+particleTemperature_(0.0),
+surfaceTemperature_(0.0),
+bulkTemperature_(0.0),
+cpParticle_(0.0),
+cpFluid_(0.0),
+kFluid_(0.0),
+totalHeatFlux_(0.0),
+nusseltNumber_(0.0),
+heatTransferCoefficient_(0.0),
+interfaceFluidTemperature_(0.0),
+referenceDiameter_(0.0),
+referenceArea_(0.0),
+minDeltaT_(SMALL),
+solidFractionThreshold_(0.999),
+thermalDebug_(false),
 bodyId_(bodyId),
 updateTorque_(false),
 bodyOperation_(0),
@@ -845,6 +871,502 @@ void immersedBody::updateVectorField
     }
 }
 //---------------------------------------------------------------------------//
+void immersedBody::updateScalarField
+(
+    volScalarField& VS,
+    word fieldName,
+    volScalarField& body
+)
+{
+    if (!immersedDict_.found(fieldName))
+    {
+        return;
+    }
+
+    const dictionary& fieldDict = immersedDict_.subDict(fieldName);
+
+    word BCType("fixedValue");
+    if (fieldDict.found("BC"))
+    {
+        fieldDict.lookup("BC") >> BCType;
+    }
+
+    if (BCType != "fixedValue" && BCType != "setValue")
+    {
+        InfoH << iB_Info << "Scalar BC type " << BCType
+              << " for field " << fieldName
+              << " not implemented. Skipping update." << endl;
+        return;
+    }
+
+    scalar boundaryValue(0.0);
+    scalar innerValue(0.0);
+
+    if (fieldName == "T" && hasThermalBC_)
+    {
+        if (thermalDynamic_)
+        {
+            // enforce the evolving particle temperature on the boundary
+            boundaryValue = particleTemperature_;
+            innerValue = particleTemperature_;
+            surfaceTemperature_ = particleTemperature_;
+        }
+        else
+        {
+            boundaryValue = surfaceTemperature_;
+            innerValue = surfaceTemperature_;
+
+            if (fieldDict.found("value"))
+            {
+                boundaryValue = readScalar(fieldDict.lookup("value"));
+            }
+
+            if (fieldDict.found("innerValue"))
+            {
+                innerValue = readScalar(fieldDict.lookup("innerValue"));
+            }
+
+            surfaceTemperature_ = boundaryValue;
+            particleTemperature_ = innerValue;
+        }
+    }
+    else
+    {
+        if (fieldDict.found("value"))
+        {
+            boundaryValue = readScalar(fieldDict.lookup("value"));
+            innerValue = boundaryValue;
+        }
+        else
+        {
+            FatalErrorInFunction
+                << "Missing entry 'value' for scalar field '" << fieldName
+                << "' in immersed body '" << bodyName_ << "'." << nl
+                << exit(FatalError);
+        }
+
+        if (fieldDict.found("innerValue"))
+        {
+            innerValue = readScalar(fieldDict.lookup("innerValue"));
+        }
+    }
+
+    List<DynamicLabelList> intLists;
+    List<DynamicLabelList> surfLists;
+    DynamicVectorList refCoMList;
+
+    geomModel_->getReferencedLists(intLists, surfLists, refCoMList);
+
+    forAll(intLists, listI)
+    {
+        DynamicLabelList& intListI = intLists[listI];
+        forAll(intListI, intCell)
+        {
+            label cellI = intListI[intCell];
+            VS[cellI] = innerValue;
+        }
+    }
+
+    forAll(surfLists, listI)
+    {
+        DynamicLabelList& surfListI = surfLists[listI];
+        forAll(surfListI, surfCell)
+        {
+            const label cellI = surfListI[surfCell];
+            VS[cellI] = boundaryValue;
+        }
+    }
+
+    if (!intpInfo_.valid())
+    {
+        return;
+    }
+}
+//---------------------------------------------------------------------------//
+void immersedBody::markSurfaceCells(volScalarField& mask) const
+{
+    if (!hasThermalBC_)
+    {
+        return;
+    }
+
+    const List<DynamicLabelList>& surfLists = geomModel_->getSurfaceCellList();
+    scalarField& maskIF = mask.primitiveFieldRef();
+
+    forAll(surfLists, listI)
+    {
+        const DynamicLabelList& surfListI = surfLists[listI];
+        forAll(surfListI, cellI)
+        {
+            const label meshCell = surfListI[cellI];
+            if (meshCell >= 0 && meshCell < mask.mesh().nCells())
+            {
+                maskIF[meshCell] = 1.0;
+            }
+        }
+    }
+}
+//---------------------------------------------------------------------------//
+void immersedBody::markInterfaceCells(volScalarField& mask) const
+{
+    if (!hasThermalBC_)
+    {
+        return;
+    }
+
+    scalarField& maskIF = mask.primitiveFieldRef();
+    const List<DynamicLabelList>& surfLists = geomModel_->getSurfaceCellList();
+    forAll(surfLists, listI)
+    {
+        const DynamicLabelList& surfListI = surfLists[listI];
+        forAll(surfListI, iCell)
+        {
+            const label meshCell = surfListI[iCell];
+            if (meshCell >= 0 && meshCell < mask.mesh().nCells())
+            {
+                maskIF[meshCell] = 1.0;
+            }
+        }
+    }
+
+    const List<DynamicLabelList>& intLists = geomModel_->getInternalCellList();
+    forAll(intLists, listI)
+    {
+        const DynamicLabelList& intListI = intLists[listI];
+        forAll(intListI, idx)
+        {
+            const label meshCell = intListI[idx];
+            if (meshCell >= 0 && meshCell < mask.mesh().nCells())
+            {
+                maskIF[meshCell] = 1.0;
+            }
+        }
+    }
+}
+//---------------------------------------------------------------------------//
+void immersedBody::updateThermalState
+(
+    const volScalarField& field,
+    const volScalarField& solidForcing,
+    const volScalarField& interfaceForcing
+)
+{
+    if (!hasThermalBC_ || !thermalConfigAvailable_)
+    {
+        totalHeatFlux_ = 0.0;
+        heatTransferCoefficient_ = 0.0;
+        nusseltNumber_ = 0.0;
+        return;
+    }
+
+    const scalar heatScale = rhoF_.value()*cpFluid_;
+    const scalarField& cellVolumes = mesh_.V();
+    const label nCells = solidForcing.mesh().nCells();
+
+    tmp<volScalarField> laplacianTmp = fvc::laplacian(DTF_, field);
+    const volScalarField& laplacianField = laplacianTmp();
+    const scalarField& laplacianIF = laplacianField.internalField();
+
+    tmp<volVectorField> gradTmp = fvc::grad(field);
+    const volVectorField& gradField = gradTmp();
+    const vectorField& gradIF = gradField.internalField();
+
+    scalar laplacianSumLocal = 0.0;
+    scalar solidSourceLocal = 0.0;
+    scalar interfaceFluidTempSumLocal = 0.0;
+    scalar interfaceFluidVolumeLocal = 0.0;
+
+    scalar interfaceSourceLocal = 0.0;
+    scalar solidVolumeLocal = 0.0;
+    scalar gradientFluxLocal = 0.0;
+    scalar gradientAreaLocal = 0.0;
+
+    label interfaceCellCountLocal = 0;
+    label solidCellCountLocal = 0;
+
+    const volScalarField* lambdaPtr = nullptr;
+    if (mesh_.foundObject<volScalarField>("lambda"))
+    {
+        lambdaPtr = &mesh_.lookupObject<volScalarField>("lambda");
+    }
+
+    const scalarField& solidIF = solidForcing.internalField();
+    const scalarField& interfaceIF = interfaceForcing.internalField();
+
+    List<DynamicLabelList> intLists;
+    List<DynamicLabelList> surfLists;
+    DynamicVectorList refCoMList;
+
+    geomModel_->getReferencedLists(intLists, surfLists, refCoMList);
+
+    auto accumulateInternalCell =
+        [&](const label meshCell)
+        {
+            if (meshCell < 0 || meshCell >= nCells)
+            {
+                return;
+            }
+
+            scalar solidFraction = 1.0;
+            if (lambdaPtr)
+            {
+                solidFraction = Foam::max
+                (
+                    scalar(0),
+                    Foam::min(scalar(1), lambdaPtr->internalField()[meshCell])
+                );
+
+                if (solidFraction <= SMALL)
+                {
+                    return;
+                }
+            }
+
+            const scalar forcingVal = solidIF[meshCell];
+            const scalar cellVol = cellVolumes[meshCell];
+            const scalar laplacianVal = laplacianIF[meshCell];
+            const scalar solidWeight = solidFraction*cellVol;
+
+            solidSourceLocal += forcingVal*solidWeight;
+            solidVolumeLocal += solidWeight;
+            laplacianSumLocal += laplacianVal*solidWeight;
+            if (thermalDebug_ && solidFraction >= solidFractionThreshold_)
+            {
+                solidCellCountLocal++;
+            }
+        };
+
+    auto accumulateInterfaceCell =
+        [&](const label meshCell)
+        {
+            if (meshCell < 0 || meshCell >= nCells)
+            {
+                return;
+            }
+
+            scalar lambdaVal = 0.0;
+            if (lambdaPtr)
+            {
+                lambdaVal = Foam::max
+                (
+                    scalar(0),
+                    Foam::min
+                    (
+                        scalar(1),
+                        lambdaPtr->internalField()[meshCell]
+                    )
+                );
+            }
+
+            const scalar cellVol = cellVolumes[meshCell];
+            const scalar interfaceFraction = Foam::max
+            (
+                scalar(0),
+                scalar(1) - lambdaVal
+            );
+
+            const scalar interfaceWeight = interfaceFraction*cellVol;
+
+            if (interfaceWeight > SMALL)
+            {
+                interfaceFluidTempSumLocal += interfaceWeight*field[meshCell];
+                interfaceFluidVolumeLocal += interfaceWeight;
+            }
+
+            const scalar interfaceVal = interfaceIF[meshCell];
+            interfaceSourceLocal += interfaceVal*interfaceWeight;
+
+            if (thermalDebug_)
+            {
+                interfaceCellCountLocal++;
+            }
+        };
+
+    forAll(intLists, listI)
+    {
+        const DynamicLabelList& intListI = intLists[listI];
+        forAll(intListI, idx)
+        {
+            accumulateInternalCell(intListI[idx]);
+        }
+    }
+
+    forAll(surfLists, listI)
+    {
+        const DynamicLabelList& surfListI = surfLists[listI];
+        forAll(surfListI, idx)
+        {
+            accumulateInterfaceCell(surfListI[idx]);
+        }
+    }
+
+    if (intpInfo_.valid())
+    {
+        intpInfo_->getIbPoints();
+        const DynamicLabelList& surfCellsFlat =
+            geomModel_->getSurfaceCellList()[Pstream::myProcNo()];
+
+        if (!surfCellsFlat.empty())
+        {
+            const List<vector>& ibNormals = intpInfo_->getIbNormals();
+
+            forAll(surfCellsFlat, idx)
+            {
+                const label meshCell = surfCellsFlat[idx];
+                if (meshCell < 0 || meshCell >= nCells)
+                {
+                    continue;
+                }
+
+                scalar lambdaVal = 1.0;
+                if (lambdaPtr)
+                {
+                    lambdaVal = Foam::max
+                    (
+                        scalar(0),
+                        Foam::min
+                        (
+                            scalar(1),
+                            lambdaPtr->internalField()[meshCell]
+                        )
+                    );
+                }
+
+                const scalar cellVol = cellVolumes[meshCell];
+                const scalar linearDim = std::cbrt(cellVol);
+                scalar areaWeight = Foam::sqr(linearDim)
+                    *Foam::max(scalar(0), lambdaVal);
+
+                if (areaWeight <= SMALL)
+                {
+                    continue;
+                }
+
+                const vector& gradVal = gradIF[meshCell];
+                const vector& normal = ibNormals[idx];
+                const scalar gradDotN = (gradVal & normal);
+
+                gradientFluxLocal += gradDotN*areaWeight;
+                gradientAreaLocal += areaWeight;
+            }
+        }
+    }
+
+    scalar laplacianSumGlobal = laplacianSumLocal;
+    scalar solidSourceGlobal = solidSourceLocal;
+    scalar interfaceFluidTempSumGlobal = interfaceFluidTempSumLocal;
+    scalar interfaceFluidVolumeGlobal = interfaceFluidVolumeLocal;
+    scalar interfaceSourceGlobal = interfaceSourceLocal;
+    scalar solidVolumeGlobal = solidVolumeLocal;
+    scalar gradientFluxGlobal = gradientFluxLocal;
+    scalar gradientAreaGlobal = gradientAreaLocal;
+
+    reduce(laplacianSumGlobal, sumOp<scalar>());
+    reduce(solidSourceGlobal, sumOp<scalar>());
+    reduce(interfaceFluidTempSumGlobal, sumOp<scalar>());
+    reduce(interfaceFluidVolumeGlobal, sumOp<scalar>());
+    reduce(interfaceSourceGlobal, sumOp<scalar>());
+    reduce(solidVolumeGlobal, sumOp<scalar>());
+    reduce(gradientFluxGlobal, sumOp<scalar>());
+    reduce(gradientAreaGlobal, sumOp<scalar>());
+
+    const scalar solidHeat = heatScale*solidSourceGlobal;
+    const scalar interfaceHeat = heatScale*interfaceSourceGlobal;
+    const scalar laplacianHeat = -heatScale*laplacianSumGlobal;
+
+    if (thermalDebug_)
+    {
+        label interfaceCellCount = interfaceCellCountLocal;
+        label solidCellCount = solidCellCountLocal;
+        reduce(interfaceCellCount, sumOp<label>());
+        reduce(solidCellCount, sumOp<label>());
+
+        const scalar solidMin = gMin(solidIF);
+        const scalar solidMax = gMax(solidIF);
+        const scalar interfaceMin = gMin(interfaceIF);
+        const scalar interfaceMax = gMax(interfaceIF);
+
+        scalar gradAreaScale = 1.0;
+        if (gradientAreaGlobal > SMALL && referenceArea_ > SMALL)
+        {
+            gradAreaScale = referenceArea_/gradientAreaGlobal;
+        }
+        const scalar gradientHeat = -kFluid_*gradAreaScale*gradientFluxGlobal;
+
+        if (Pstream::master())
+        {
+            Info<< "HFDIB body thermalDebug " << bodyName_ << ":"
+                << " interfaceCells=" << interfaceCellCount
+                << " solidCells=" << solidCellCount
+                << " interfaceFluidVolume=" << interfaceFluidVolumeGlobal
+                << " solidHeat(rho cp)=" << solidHeat
+                << " interfaceHeat(rho cp)=" << interfaceHeat
+                << " laplacianSum=" << laplacianSumGlobal
+                << " laplacianHeat=" << laplacianHeat
+                << " gradSum=" << gradientFluxGlobal
+                << " gradArea=" << gradientAreaGlobal
+                << " gradHeat(k)=" << gradientHeat
+                << " solidVolume=" << solidVolumeGlobal
+                << " fluidTempSum=" << interfaceFluidTempSumGlobal
+                << " interfaceArea=" << gradientAreaGlobal
+                << " qLaplace=" << laplacianHeat
+                << " qInterface=" << interfaceHeat
+                << " qSolid=" << solidHeat
+                << " maskThreshold=" << solidFractionThreshold_
+                << " solidForcing[min,max]=" << solidMin << ", " << solidMax << "]"
+                << " interfaceForcing[min,max]=" << interfaceMin << ", " << interfaceMax << "]"
+                << endl;
+        }
+    }
+
+    // Positive totalHeatFlux_ indicates heat leaving the particle
+    totalHeatFlux_ = -(solidHeat + interfaceHeat);
+
+    interfaceFluidTemperature_ = 0.0;
+    if (interfaceFluidVolumeGlobal > SMALL)
+    {
+        interfaceFluidTemperature_ = interfaceFluidTempSumGlobal/interfaceFluidVolumeGlobal;
+        if (!bulkTemperatureFixed_)
+        {
+            bulkTemperature_ = interfaceFluidTemperature_;
+        }
+    }
+
+    if (thermalDynamic_)
+    {
+        const scalar heatCapacity = geomModel_->getM0()*cpParticle_;
+        if (heatCapacity > SMALL)
+        {
+            particleTemperature_ -= (totalHeatFlux_/heatCapacity)
+                * mesh_.time().deltaTValue();
+        }
+    }
+
+    heatTransferCoefficient_ = 0.0;
+    nusseltNumber_ = 0.0;
+
+    if (referenceArea_ > SMALL)
+    {
+        scalar deltaT = surfaceTemperature_ - bulkTemperature_;
+        if (mag(deltaT) < minDeltaT_)
+        {
+            deltaT = (deltaT >= 0.0) ? minDeltaT_ : -minDeltaT_;
+        }
+
+    heatTransferCoefficient_ = totalHeatFlux_/(referenceArea_*deltaT);
+
+        if (computeNu_ && referenceDiameter_ > SMALL && kFluid_ > SMALL)
+        {
+            nusseltNumber_ = heatTransferCoefficient_*referenceDiameter_/kFluid_;
+        }
+    }
+
+    if (thermalDynamic_)
+    {
+        surfaceTemperature_ = particleTemperature_;
+    }
+}
+//---------------------------------------------------------------------------//
 // reset body field for this immersed object
 vectorField immersedBody::getUatIbPoints()
 {
@@ -865,6 +1387,70 @@ vectorField immersedBody::getUatIbPoints()
     }
 
     return ibPointsVal;
+}
+//---------------------------------------------------------------------------//
+scalarField immersedBody::getScalarDirichletValues
+(
+    const volScalarField& field,
+    const word& fieldName
+)
+{
+    scalar boundaryValue = 0.0;
+    bool hasValue = false;
+
+    if (fieldName == "T" && hasThermalBC_)
+    {
+        boundaryValue = surfaceTemperature_;
+        hasValue = true;
+    }
+    else if (immersedDict_.found(fieldName))
+    {
+        const dictionary& fieldDict = immersedDict_.subDict(fieldName);
+        if (fieldDict.found("value"))
+        {
+            boundaryValue = readScalar(fieldDict.lookup("value"));
+            hasValue = true;
+        }
+    }
+
+    if (!hasValue)
+    {
+        return scalarField();
+    }
+
+    if (intpInfo_.valid())
+    {
+        // Ensure cached interpolation info reflects the current geometry.
+        intpInfo_->getIbPoints();
+    }
+
+    const List<DynamicLabelList>& surfLists = geomModel_->getSurfaceCellList();
+    if (surfLists.size() <= Pstream::myProcNo())
+    {
+        return scalarField();
+    }
+
+    const DynamicLabelList& surfCells = surfLists[Pstream::myProcNo()];
+    if (surfCells.empty())
+    {
+        return scalarField();
+    }
+
+    const scalarField& internalValues = field.internalField();
+    const label nCells = internalValues.size();
+
+    scalarField ibValues(surfCells.size(), boundaryValue);
+
+    forAll(surfCells, idx)
+    {
+        const label cellI = surfCells[idx];
+        if (cellI >= 0 && cellI < nCells)
+        {
+            ibValues[idx] = internalValues[cellI];
+        }
+    }
+
+    return ibValues;
 }
 //---------------------------------------------------------------------------//
 // function to move the body after the contact
@@ -1149,3 +1735,4 @@ void immersedBody::chceckBodyOp()
 
     ibContactClass_->inContactWithStatic(false);
 }
+

@@ -75,6 +75,12 @@ int main(int argc, char *argv[])
     openHFDIBDEM  HFDIBDEM(mesh);
     HFDIBDEM.initialize(lambda,U,refineF,maxRefinementLevel,runTime.timeName());
     #include "initialMeshRefinement.H"
+
+    // Ensure newly created solids start at their prescribed thermal state.
+    HFDIBDEM.updateScalarField(T, "T", lambda);
+    T.correctBoundaryConditions();
+    Ti = T;
+    Ti.correctBoundaryConditions();
     
     if(HFDIBDEM.getRecordFirstTime())
     {
@@ -108,6 +114,9 @@ int main(int argc, char *argv[])
 
         clockTime createBodiesTime; // OS time efficiency testing
         HFDIBDEM.createBodies(lambda,refineF);
+    // Keep injected bodies on their Dirichlet temperature to avoid spikes.
+    HFDIBDEM.updateScalarField(T, "T", lambda);
+    T.correctBoundaryConditions();
         suplTime_ += createBodiesTime.timeIncrement(); // OS time efficiency testing
         
         clockTime preUpdateBodiesTime; // OS time efficiency testing
@@ -164,6 +173,9 @@ int main(int argc, char *argv[])
                 turbulence->correct();
             }
         }
+
+        #include "TEqn.H"
+
         CFDTime_ += pimpleRunClockTime.timeIncrement();
         Info << "updating HFDIBDEM" << endl;
         clockTime postUpdateBodiesTime;

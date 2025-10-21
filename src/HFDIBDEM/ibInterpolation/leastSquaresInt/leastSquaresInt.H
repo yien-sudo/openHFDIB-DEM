@@ -72,6 +72,14 @@ namespace Foam
             const Foam::fvMesh& mesh
         );
 
+        void imposeScalarDirichlet
+        (
+            leastSquaresIntInfo& intpInfo,
+            volScalarField& Si,
+            const scalarField& ibPointsVal,
+            const Foam::fvMesh& mesh
+        );
+
         void adjustPhi
         (
             leastSquaresIntInfo& intpInfo,
@@ -97,6 +105,14 @@ namespace Foam
             interpolationInfo& intpInfo,
             volVectorField& Ui,
             vectorField ibPointsVal,
+            const Foam::fvMesh& mesh
+        ) override;
+
+        void ibInterpolateScalar
+        (
+            interpolationInfo& intpInfo,
+            volScalarField& Si,
+            const scalarField& ibPointsVal,
             const Foam::fvMesh& mesh
         ) override;
 

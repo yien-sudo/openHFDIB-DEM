@@ -571,6 +571,8 @@ void openHFDIBDEM::recreateBodies
     {
         if (immersedBodies_[bodyId].getIsActive())
         {
+            // Topology changed, drop any cached interpolation data
+            immersedBodies_[bodyId].clearIntpInfo();
             immersedBodies_[bodyId].recreateBodyField(body,refineF);
         }
     }
@@ -620,6 +622,175 @@ void openHFDIBDEM::interpolateIB( volVectorField & V
                     mesh_
                 );
             }
+        }
+    }
+}
+//---------------------------------------------------------------------------//
+void openHFDIBDEM::interpolateScalar
+(
+    const volScalarField& source,
+    volScalarField& target,
+    volScalarField& body
+)
+{
+    target = source; // Copy source to target
+    target.correctBoundaryConditions();
+    updateScalarField(target, source.name(), body);
+}
+void openHFDIBDEM::updateScalarField
+(
+    volScalarField& field,
+    const word& fieldName,
+    volScalarField& body
+)
+{
+    if (ibInterp_.valid())
+    {
+        const word schemeField = field.name();
+
+        if (!HFDIBinterpDict_.found(schemeField))
+        {
+            if
+            (
+                schemeField != fieldName
+             && HFDIBinterpDict_.found(fieldName)
+            )
+            {
+                const word fallbackScheme = HFDIBinterpDict_.lookup(fieldName);
+                HFDIBinterpDict_.set(schemeField, fallbackScheme);
+            }
+
+            if
+            (
+                !HFDIBinterpDict_.found(schemeField)
+             && HFDIBinterpDict_.found("default")
+            )
+            {
+                const word defaultScheme = HFDIBinterpDict_.lookup("default");
+                HFDIBinterpDict_.set(schemeField, defaultScheme);
+            }
+        }
+
+        ibInterp_->resetScalarInterpolator(field);
+    }
+
+    forAll (immersedBodies_, bodyId)
+    {
+        if (immersedBodies_[bodyId].getIsActive())
+        {
+            if (Pstream::master())
+            {
+                Info<< "HFDIBDEM::updateScalarField body "
+                    << immersedBodies_[bodyId].getBodyId()
+                    << " pre-update" << endl;
+            }
+            immersedBodies_[bodyId].updateScalarField(field, fieldName, body);
+
+            if (ibInterp_.valid())
+            {
+                if (Pstream::master())
+                {
+                    Info<< "HFDIBDEM::updateScalarField body "
+                        << immersedBodies_[bodyId].getBodyId()
+                        << " applying ibInterpolateScalar" << endl;
+                }
+                scalarField ibValues =
+                    immersedBodies_[bodyId].getScalarDirichletValues
+                    (
+                        field,
+                        fieldName
+                    );
+
+                if (Pstream::master())
+                {
+                    Info<< "HFDIBDEM::updateScalarField body "
+                        << immersedBodies_[bodyId].getBodyId()
+                        << " | ibValues size " << ibValues.size() << endl;
+                }
+
+                ibInterp_->ibInterpolateScalar
+                (
+                    immersedBodies_[bodyId].getIntpInfo(),
+                    field,
+                    ibValues,
+                    mesh_
+                );
+
+                if (Pstream::master())
+                {
+                    Info<< "HFDIBDEM::updateScalarField body "
+                        << immersedBodies_[bodyId].getBodyId()
+                        << " completed ibInterpolateScalar" << endl;
+                }
+            }
+        }
+    }
+}
+//---------------------------------------------------------------------------//
+void openHFDIBDEM::computeInterfaceMask(volScalarField& mask) const
+{
+    mask = dimensionedScalar("zero", mask.dimensions(), 0.0);
+
+    forAll(immersedBodies_, bodyId)
+    {
+        if (immersedBodies_[bodyId].getIsActive())
+        {
+            immersedBodies_[bodyId].markInterfaceCells(mask);
+        }
+    }
+
+    mask.correctBoundaryConditions();
+}
+//---------------------------------------------------------------------------//
+void openHFDIBDEM::computeSurfaceMask(volScalarField& mask) const
+{
+    mask = dimensionedScalar("zero", mask.dimensions(), 0.0);
+
+    forAll(immersedBodies_, bodyId)
+    {
+        if (immersedBodies_[bodyId].getIsActive())
+        {
+            immersedBodies_[bodyId].markSurfaceCells(mask);
+        }
+    }
+
+    mask.correctBoundaryConditions();
+}
+//---------------------------------------------------------------------------//
+bool openHFDIBDEM::anyThermallyDynamicBody() const
+{
+    forAll (immersedBodies_, bodyId)
+    {
+        if
+        (
+            immersedBodies_[bodyId].getIsActive()
+         && immersedBodies_[bodyId].getThermalDynamic()
+        )
+        {
+            return true;
+        }
+    }
+
+    return false;
+}
+//---------------------------------------------------------------------------//
+void openHFDIBDEM::updateThermalDiagnostics
+(
+    const volScalarField& field,
+    const volScalarField& solidForcing,
+    const volScalarField& interfaceForcing
+)
+{
+    forAll (immersedBodies_, bodyId)
+    {
+        if (immersedBodies_[bodyId].getIsActive())
+        {
+            immersedBodies_[bodyId].updateThermalState
+            (
+                field,
+                solidForcing,
+                interfaceForcing
+            );
         }
     }
 }

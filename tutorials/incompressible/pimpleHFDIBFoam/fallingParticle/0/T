@@ -1,44 +1,44 @@
 /*--------------------------------*- C++ -*----------------------------------*\
 | =========                 |                                                 |
-| \\      /  F ield         | OpenFOAM: The Open Source CFD Toolbox           |
-|  \\    /   O peration     | Version:  3.0.x                                 |
-|   \\  /    A nd           | Web:      www.OpenFOAM.org                      |
-|    \\/     M anipulation  |                                                 |
+| \      /  F ield         | OpenFOAM: The Open Source CFD Toolbox           |
+|  \    /   O peration     | Version:  8                                     |
+|   \  /    A nd           | Web:      www.OpenFOAM.org                      |
+|    \/     M anipulation  |                                                 |
 \*---------------------------------------------------------------------------*/
 FoamFile
 {
     version     2.0;
     format      ascii;
-    class       volVectorField;
+    class       volScalarField;
     location    "0";
-    object      U;
+    object      T;
 }
 // * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * //
 
-dimensions      [0 1 -1 0 0 0 0];
+dimensions      [0 0 0 1 0 0 0];
 
-internalField   uniform (0 0 0);
+internalField   uniform 300;
 
 boundaryField
 {
     xMin
     {
-        type            slip;
+        type            zeroGradient;
     }
 
     xMax
     {
-        type            slip;
+        type            zeroGradient;
     }
 
     yMin
     {
-        type            slip;
+        type            zeroGradient;
     }
 
     yMax
     {
-        type            slip;
+        type            zeroGradient;
     }
 
     bottom
@@ -51,7 +51,6 @@ boundaryField
         type            cyclic;
     }
 }
-
 
 
 // ************************************************************************* //

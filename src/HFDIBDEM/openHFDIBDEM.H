@@ -154,6 +154,9 @@ namespace Foam
         volScalarField& refineF
     );
 
+    void computeInterfaceMask(volScalarField& mask) const;
+    void computeSurfaceMask(volScalarField& mask) const;
+
     void preUpdateBodies
     (
         volScalarField& body,
@@ -180,6 +183,29 @@ namespace Foam
         volVectorField& Vs,
         volScalarField& body
     );
+
+    void interpolateScalar
+    (
+        const volScalarField& source,
+        volScalarField& target,
+        volScalarField& body
+    );
+
+    void updateScalarField
+    (
+        volScalarField& field,
+        const word& fieldName,
+        volScalarField& body
+    );
+
+    bool anyThermallyDynamicBody() const;
+
+        void updateThermalDiagnostics
+        (
+            const volScalarField& field,
+            const volScalarField& solidForcing,
+            const volScalarField& interfaceForcing
+        );
 
     // save the moved STL files
     void writeBodiesInfo();
